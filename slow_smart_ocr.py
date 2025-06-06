@@ -181,27 +181,6 @@ def detect_book_corners(img, debug_folder=None):
     best_corners = None
     best_area = 0
     
-    # Try text-specific detection methods first
-    """
-    text_methods = [
-        ("text_regions", detect_text_region_corners),
-        ("projection", detect_page_boundaries_projection),
-        ("mser_text", detect_text_regions_mser)
-    ]
-    
-    for method_name, method_func in text_methods:
-        print(f"Trying {method_name}...")
-        try:
-            text_corners = method_func(img, debug_folder)
-            if text_corners is not None and is_valid_rectangle(text_corners, w, h):
-                area = cv2.contourArea(text_corners)
-                if area > best_area:
-                    best_corners = text_corners
-                    best_area = area
-                    print(f"  Found good text region with area {area}")
-        except Exception as e:
-            print(f"  {method_name} failed: {e}")
-    """
     text_corners = detect_text_regions_mser(img, debug_folder)
     if text_corners is not None and is_valid_rectangle(text_corners, w, h):
         area = cv2.contourArea(text_corners)
@@ -209,111 +188,6 @@ def detect_book_corners(img, debug_folder=None):
             best_corners = text_corners
             best_area = area
             print(f"  Found good text region with area {area}")
-    
-    # Fallback: if no good rectangle found, use edge-based detection
-    if best_corners is None:
-        print("No rectangular contour found, trying edge-based detection...")
-        best_corners = detect_corners_by_edges(gray, debug_folder)
-    
-    # Final fallback: use full image
-    if best_corners is None:
-        print("Warning: Could not detect book corners. Using full image.")
-        best_corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32)
-    
-    return best_corners
-
-def detect_book_corners_old(img, debug_folder=None):
-    """
-    Detect the corners of a book in an image using multiple detection strategies.
-    Returns the four corner points of the largest rectangular contour.
-    """
-    # Convert to grayscale if needed
-    if len(img.shape) == 3:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = img.copy()
-    
-    h, w = gray.shape
-    min_area = (h * w) * 0.1  # Minimum 10% of image area
-    
-    print(f"Image dimensions: {w}x{h}, minimum contour area: {min_area}")
-    
-    # Try multiple preprocessing approaches
-    preprocessing_methods = [
-        ("canny", lambda g: cv2.Canny(g, 50, 150)),
-        ("adaptive_thresh", lambda g: cv2.adaptiveThreshold(
-            cv2.GaussianBlur(g, (5, 5), 0), 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-            cv2.THRESH_BINARY, 11, 2)),
-        ("otsu_thresh", lambda g: cv2.threshold(
-            cv2.GaussianBlur(g, (5, 5), 0), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]),
-        ("morph_gradient", lambda g: cv2.morphologyEx(
-            cv2.GaussianBlur(g, (3, 3), 0), cv2.MORPH_GRADIENT, 
-            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))))
-    ]
-    
-    best_corners = None
-    best_area = 0
-    
-    for method_name, preprocess_func in preprocessing_methods:
-        print(f"Trying {method_name} preprocessing...")
-        
-        # Apply preprocessing
-        processed = preprocess_func(gray)
-        
-        # Save debug image if folder provided
-        if debug_folder:
-            cv2.imwrite(f"{debug_folder}/03_{method_name}_processed.jpg", processed)
-        
-        # Find contours
-        contours, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Filter contours by area and try to find rectangular ones
-        valid_contours = [c for c in contours if cv2.contourArea(c) > min_area]
-        print(f"  Found {len(valid_contours)} contours with area > {min_area}")
-        
-        # Sort by area (largest first)
-        valid_contours = sorted(valid_contours, key=cv2.contourArea, reverse=True)
-        
-        # Try different epsilon values for polygon approximation
-        for contour in valid_contours[:5]:  # Check top 5 largest contours
-            area = cv2.contourArea(contour)
-            perimeter = cv2.arcLength(contour, True)
-
-            if debug_folder:
-                contour_img = img.copy()
-                cv2.drawContours(contour_img, [contour], -1, (0, 255, 0), 3)
-                cv2.imwrite(f"{debug_folder}/contour_{method_name}_{area:.0f}.jpg", contour_img)
-            
-            for epsilon_factor in [0.01, 0.02, 0.03, 0.05]:
-                epsilon = epsilon_factor * perimeter
-                approx = cv2.approxPolyDP(contour, epsilon, True)
-
-                # Visualize approximated polygon
-                if debug_folder and len(approx) >= 3:
-                    poly_img = img.copy()
-                    cv2.polylines(poly_img, [approx], True, (255, 0, 0), 3)
-                    # Draw corner points
-                    for i, pt in enumerate(approx.reshape(-1, 2)):
-                        cv2.circle(poly_img, tuple(pt), 10, (0, 0, 255), -1)
-                        cv2.putText(poly_img, str(i), tuple(pt + [15, 15]), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-                    cv2.imwrite(f"{debug_folder}/poly_{method_name}_{len(approx)}pts_{area:.0f}.jpg", poly_img)
-                 
-                    # Look for 4-sided polygons
-                    if len(approx) == 4 and area > best_area:
-                        corners = approx.reshape(4, 2)
-                        # Basic validation: check if corners form a reasonable rectangle
-                        if is_valid_rectangle(corners, w, h):
-                            best_corners = corners
-                            best_area = area
-                            print(f"  Found good rectangle with area {area} using {method_name}")
-                            break
-            
-            if best_corners is not None:
-                break
-        
-        if best_corners is not None:
-            break
     
     # Fallback: if no good rectangle found, use edge-based detection
     if best_corners is None:
@@ -482,6 +356,7 @@ def order_corners(corners):
 def correct_perspective(img, corners):
     """
     Apply perspective correction to straighten the book image.
+    Accounts for page warping by adding conservative margins.
     """
     # Order the corners
     ordered_corners = order_corners(corners)
@@ -495,19 +370,28 @@ def correct_perspective(img, corners):
     height_right = np.linalg.norm(ordered_corners[2] - ordered_corners[1])
     height = int(max(height_left, height_right))
     
-    # Define destination points for perspective correction
+    # Add conservative margins to account for page warping and detection errors
+    width_margin = int(width * 0.05)  # 5% margin on left/right
+    height_margin_top = int(height * 0.08)  # 8% margin on top (more for warping)
+    height_margin_bottom = int(height * 0.12)  # 12% margin on bottom (more for warping)
+    
+    # Adjust final dimensions
+    final_width = width + (2 * width_margin)
+    final_height = height + height_margin_top + height_margin_bottom
+    
+    # Define destination points for perspective correction with margins
     dst_corners = np.array([
-        [0, 0],
-        [width, 0],
-        [width, height],
-        [0, height]
+        [width_margin, height_margin_top],  # top-left with margins
+        [width + width_margin, height_margin_top],  # top-right
+        [width + width_margin, height + height_margin_top],  # bottom-right
+        [width_margin, height + height_margin_top]  # bottom-left
     ], dtype=np.float32)
     
     # Calculate perspective transformation matrix
     matrix = cv2.getPerspectiveTransform(ordered_corners, dst_corners)
     
-    # Apply perspective correction
-    corrected = cv2.warpPerspective(img, matrix, (width, height))
+    # Apply perspective correction with the expanded canvas
+    corrected = cv2.warpPerspective(img, matrix, (final_width, final_height))
     
     return corrected
 
