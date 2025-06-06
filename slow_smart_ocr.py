@@ -12,10 +12,10 @@ def detect_text_regions_mser(img, debug_folder=None):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
     mser = cv2.MSER_create(
         delta=5,
-        min_area=60,
-        max_area=14400,
-        max_variation=0.25,
-        min_diversity=0.2,
+        min_area=10,
+        max_area=300,
+        max_variation=0.5,
+        min_diversity=0.5,
         max_evolution=200,
         area_threshold=1.01,
         min_margin=0.003,
@@ -36,6 +36,7 @@ def detect_text_regions_mser(img, debug_folder=None):
     """
     
     regions, _ = mser.detectRegions(gray)
+    print(f"Found {len(regions)} regions using MSER")
     
     if debug_folder:
         mser_vis = img.copy()
@@ -55,6 +56,7 @@ def detect_text_regions_mser(img, debug_folder=None):
         if 0.1 < aspect_ratio < 10 and w > 20 and h > 10:
             text_regions.append(region)
     
+    print(f"Found {len(text_regions)} text regions using MSER")
     if text_regions:
         # Combine all text regions to find overall text area
         all_points = np.vstack(text_regions)
@@ -70,13 +72,16 @@ def detect_text_regions_mser(img, debug_folder=None):
         epsilon = 0.02 * cv2.arcLength(text_hull, True)
         approx = cv2.approxPolyDP(text_hull, epsilon, True)
         
-        if len(approx) == 4:
-            # Standard approximation worked
-            final_corners = approx.reshape(4, 2)
-        else:
-            # Force a 4-corner rectangle that encompasses 90% of regions
-            print(f"Standard approximation gave {len(approx)} corners, forcing 4-corner rectangle...")
-            final_corners = force_rectangle_from_regions(text_regions, coverage_threshold=0.9)
+        print(f"Standard approximation gave {len(approx)} corners, forcing 4-corner rectangle...")
+        coverage_actual = 0
+        coverage_threshold = 0.97
+        # Cut of 9% of regions and test our threshold. Cut off less until we achieve our target
+        for step in [0.09, 0.07, 0.05, 0.03, 0.02, 0.01, 0.005]:
+            print(f"Taking step {step} percent")
+            coverage_actual, final_corners = force_rectangle_from_regions(text_regions, step)
+            if coverage_actual >= coverage_threshold:
+                print(f"Found good rectangle with coverage {coverage_actual}")
+                continue
         
         if debug_folder and final_corners is not None:
             # Debug visualization of the final result
@@ -93,10 +98,9 @@ def detect_text_regions_mser(img, debug_folder=None):
         return final_corners
 
 
-def force_rectangle_from_regions(text_regions, coverage_threshold=0.9):
+def force_rectangle_from_regions(text_regions, outlier_percent):
     """
-    Force creation of a 4-corner rectangle that encompasses at least 
-    coverage_threshold (e.g., 90%) of the text regions.
+    Force creation of a 4-corner rectangle that encompasses a a region
     """
     if not text_regions:
         return None
@@ -116,9 +120,6 @@ def force_rectangle_from_regions(text_regions, coverage_threshold=0.9):
     
     region_centers = np.array(region_centers)
     total_regions = len(text_regions)
-    target_regions = int(total_regions * coverage_threshold)
-    
-    print(f"Trying to cover {target_regions} out of {total_regions} regions ({coverage_threshold*100}%)")
     
     # Method 1: Find rectangle that covers target percentage by expanding from center
     all_points = np.vstack(text_regions)
@@ -131,7 +132,6 @@ def force_rectangle_from_regions(text_regions, coverage_threshold=0.9):
     x_sorted = np.sort(x_coords)
     y_sorted = np.sort(y_coords)
     
-    outlier_percent = 0.05  # Remove 5% outliers
     x_min = x_sorted[int(len(x_sorted) * outlier_percent)]
     x_max = x_sorted[int(len(x_sorted) * (1 - outlier_percent))]
     y_min = y_sorted[int(len(y_sorted) * outlier_percent)]
@@ -152,49 +152,8 @@ def force_rectangle_from_regions(text_regions, coverage_threshold=0.9):
         if (x_min <= region_center[0] <= x_max and 
             y_min <= region_center[1] <= y_max):
             covered_regions += 1
-    
     coverage_actual = covered_regions / total_regions
-    print(f"Forced rectangle covers {covered_regions}/{total_regions} regions ({coverage_actual*100:.1f}%)")
-    
-    if coverage_actual >= coverage_threshold * 0.8:  # Accept if at least 80% of target
-        return forced_corners
-    else:
-        # Fallback: use full convex hull corners approximated more aggressively
-        print("Coverage too low, using aggressive hull approximation...")
-        all_points = np.vstack(text_regions)
-        hull = cv2.convexHull(all_points.reshape(-1, 1, 2))
-        
-        # Try more aggressive epsilon values
-        for eps_factor in [0.05, 0.08, 0.1, 0.15]:
-            epsilon = eps_factor * cv2.arcLength(hull, True)
-            approx = cv2.approxPolyDP(hull, epsilon, True)
-            if len(approx) == 4:
-                return approx.reshape(4, 2)
-        
-        # Final fallback: find 4 most extreme points
-        return find_extreme_rectangle(all_points)
-
-
-def find_extreme_rectangle(points):
-    """
-    Find 4 corners by selecting the most extreme points.
-    """
-    # Find extreme points
-    leftmost = points[np.argmin(points[:, 0])]
-    rightmost = points[np.argmax(points[:, 0])]
-    topmost = points[np.argmin(points[:, 1])]
-    bottommost = points[np.argmax(points[:, 1])]
-    
-    # Create rectangle from extremes
-    x_min, x_max = leftmost[0], rightmost[0]
-    y_min, y_max = topmost[1], bottommost[1]
-    
-    return np.array([
-        [x_min, y_min],  # top-left
-        [x_max, y_min],  # top-right
-        [x_max, y_max],  # bottom-right
-        [x_min, y_max]   # bottom-left
-    ], dtype=np.float32)
+    return coverage_actual, forced_corners
 
 
 def detect_book_corners(img, debug_folder=None):
