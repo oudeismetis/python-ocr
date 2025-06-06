@@ -4,118 +4,12 @@ from pytesseract import image_to_string
 import numpy as np
 import cv2
 
-def detect_text_region_corners(img, debug_folder=None):
-    """
-    Detect corners of text regions specifically, not just the book outline.
-    """
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
-    
-    # Text detection using connected components
-    # Create binary image optimized for text
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    enhanced = clahe.apply(gray)
-    
-    # Multiple thresholding approaches for text
-    thresh_methods = [
-        cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
-        cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 8),
-        cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 8)
-    ]
-    
-    text_regions = []
-    for i, thresh in enumerate(thresh_methods):
-        if debug_folder:
-            print(f"Writing image to: {debug_folder}/text_thresh_{i}.jpg")
-            cv2.imwrite(f"{debug_folder}/text_thresh_{i}.jpg", thresh)
-        
-        # Find connected components (potential text)
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(thresh, connectivity=8)
-        
-        # Filter for text-like components
-        text_components = []
-        for j in range(1, num_labels):  # Skip background
-            x, y, w, h, area = stats[j]
-            aspect_ratio = w / h if h > 0 else 0
-            
-            # Text characteristics: reasonable size, aspect ratio
-            if (10 < w < img.shape[1]//3 and 
-                5 < h < img.shape[0]//5 and 
-                0.1 < aspect_ratio < 10 and 
-                area > 50):
-                text_components.append((x, y, w, h))
-        
-        if text_components:
-            # Find bounding box of all text components
-            min_x = min(comp[0] for comp in text_components)
-            min_y = min(comp[1] for comp in text_components)
-            max_x = max(comp[0] + comp[2] for comp in text_components)
-            max_y = max(comp[1] + comp[3] for comp in text_components)
-            
-            text_region = np.array([[min_x, min_y], [max_x, min_y], 
-                                  [max_x, max_y], [min_x, max_y]], dtype=np.float32)
-            text_regions.append(text_region)
-    
-    return text_regions[0] if text_regions else None
-
-
-def detect_page_boundaries_projection(img, debug_folder=None):
-    """
-    Use projection analysis to find text boundaries (page margins).
-    """
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
-    
-    # Binarize for text detection
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    
-    # Horizontal and vertical projections
-    h_projection = np.sum(binary, axis=0)  # Sum along columns
-    v_projection = np.sum(binary, axis=1)  # Sum along rows
-    
-    if debug_folder:
-        # Visualize projections
-        proj_vis = np.zeros((img.shape[0] + 100, img.shape[1] + 100, 3), dtype=np.uint8)
-        proj_vis[:img.shape[0], :img.shape[1]] = img
-        
-        # Draw horizontal projection
-        h_norm = (h_projection / h_projection.max() * 80).astype(int)
-        for i, val in enumerate(h_norm):
-            cv2.line(proj_vis, (i, img.shape[0]), (i, img.shape[0] + val), (0, 255, 0), 1)
-        
-        # Draw vertical projection  
-        v_norm = (v_projection / v_projection.max() * 80).astype(int)
-        for i, val in enumerate(v_norm):
-            cv2.line(proj_vis, (img.shape[1], i), (img.shape[1] + val, i), (0, 0, 255), 1)
-        
-        print(f"Writing image to: {debug_folder}/projections.jpg")
-        cv2.imwrite(f"{debug_folder}/projections.jpg", proj_vis)
-    
-    # Find text boundaries based on projection
-    h_threshold = np.mean(h_projection) * 0.3
-    v_threshold = np.mean(v_projection) * 0.3
-    
-    # Find first and last significant peaks
-    h_text_start = np.argmax(h_projection > h_threshold)
-    h_text_end = len(h_projection) - 1 - np.argmax(h_projection[::-1] > h_threshold)
-    
-    v_text_start = np.argmax(v_projection > v_threshold)
-    v_text_end = len(v_projection) - 1 - np.argmax(v_projection[::-1] > v_threshold)
-    
-    # Return text region corners
-    return np.array([
-        [h_text_start, v_text_start],
-        [h_text_end, v_text_start], 
-        [h_text_end, v_text_end],
-        [h_text_start, v_text_end]
-    ], dtype=np.float32)
-
 
 def detect_text_regions_mser(img, debug_folder=None):
     """
     Use MSER to detect text regions and find their bounding corners.
     """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
-    
-    # Create MSER detector
     mser = cv2.MSER_create(
         delta=5,
         min_area=60,
@@ -127,6 +21,19 @@ def detect_text_regions_mser(img, debug_folder=None):
         min_margin=0.003,
         edge_blur_size=5
     )
+    """
+    mser = cv2.MSER_create(
+        delta=8,           # Increased from 5 - less sensitive to small variations
+        min_area=120,      # Increased from 60 - filter out tiny noise regions
+        max_area=7200,     # Decreased from 14400 - avoid huge regions
+        max_variation=0.15, # Decreased from 0.25 - more restrictive on variation
+        min_diversity=0.3,  # Increased from 0.2 - more diverse regions
+        max_evolution=150,  # Decreased from 200 - less evolution steps
+        area_threshold=1.02, # Slightly increased from 1.01
+        min_margin=0.005,   # Increased from 0.003
+        edge_blur_size=3    # Decreased from 5 - less blurring
+    )
+    """
     
     regions, _ = mser.detectRegions(gray)
     
@@ -135,8 +42,8 @@ def detect_text_regions_mser(img, debug_folder=None):
         for region in regions:
             hull = cv2.convexHull(region.reshape(-1, 1, 2))
             cv2.polylines(mser_vis, [hull], True, (0, 255, 0), 1)
-        print(f"Writing image to: {debug_folder}/mser_regions.jpg")
-        cv2.imwrite(f"{debug_folder}/mser_regions.jpg", mser_vis)
+        print(f"Writing image to: {debug_folder}/02_mser_regions.jpg")
+        cv2.imwrite(f"{debug_folder}/02_mser_regions.jpg", mser_vis)
     
     # Filter regions that look like text
     text_regions = []
@@ -153,14 +60,142 @@ def detect_text_regions_mser(img, debug_folder=None):
         all_points = np.vstack(text_regions)
         text_hull = cv2.convexHull(all_points.reshape(-1, 1, 2))
         
-        # Approximate to rectangle
+        if debug_folder:
+            # Visualize the combined hull
+            hull_img = img.copy()
+            cv2.polylines(hull_img, [text_hull], True, (255, 0, 255), 4)
+            cv2.imwrite(f"{debug_folder}/03_mser_combined_hull.jpg", hull_img)
+        
+        # Try standard approximation first
         epsilon = 0.02 * cv2.arcLength(text_hull, True)
         approx = cv2.approxPolyDP(text_hull, epsilon, True)
         
         if len(approx) == 4:
-            return approx.reshape(4, 2)
+            # Standard approximation worked
+            final_corners = approx.reshape(4, 2)
+        else:
+            # Force a 4-corner rectangle that encompasses 90% of regions
+            print(f"Standard approximation gave {len(approx)} corners, forcing 4-corner rectangle...")
+            final_corners = force_rectangle_from_regions(text_regions, coverage_threshold=0.9)
+        
+        if debug_folder and final_corners is not None:
+            # Debug visualization of the final result
+            bbox_img = img.copy()
+            cv2.polylines(bbox_img, [final_corners.astype(int)], True, (0, 255, 0), 3)
+            for i, pt in enumerate(final_corners):
+                cv2.circle(bbox_img, tuple(pt.astype(int)), 8, (0, 0, 255), -1)
+                cv2.putText(bbox_img, str(i), tuple((pt + [12, 12]).astype(int)), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            area = cv2.contourArea(final_corners.astype(int))
+            cv2.putText(bbox_img, f"Area: {area:.0f}", (20, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.imwrite(f"{debug_folder}/04_mser_final_rectangle.jpg", bbox_img)
+        return final_corners
+
+
+def force_rectangle_from_regions(text_regions, coverage_threshold=0.9):
+    """
+    Force creation of a 4-corner rectangle that encompasses at least 
+    coverage_threshold (e.g., 90%) of the text regions.
+    """
+    if not text_regions:
+        return None
     
-    return None
+    # Get all region centers and bounding boxes
+    region_centers = []
+    region_bounds = []
+    
+    for region in text_regions:
+        # Get center of each region
+        center = np.mean(region, axis=0)
+        region_centers.append(center)
+        
+        # Get bounding box of each region
+        x, y, w, h = cv2.boundingRect(region.reshape(-1, 1, 2))
+        region_bounds.append((x, y, x+w, y+h))
+    
+    region_centers = np.array(region_centers)
+    total_regions = len(text_regions)
+    target_regions = int(total_regions * coverage_threshold)
+    
+    print(f"Trying to cover {target_regions} out of {total_regions} regions ({coverage_threshold*100}%)")
+    
+    # Method 1: Find rectangle that covers target percentage by expanding from center
+    all_points = np.vstack(text_regions)
+    
+    # Get extreme points with some outlier removal
+    x_coords = all_points[:, 0]
+    y_coords = all_points[:, 1]
+    
+    # Remove extreme outliers (bottom/top 5% in each dimension)
+    x_sorted = np.sort(x_coords)
+    y_sorted = np.sort(y_coords)
+    
+    outlier_percent = 0.05  # Remove 5% outliers
+    x_min = x_sorted[int(len(x_sorted) * outlier_percent)]
+    x_max = x_sorted[int(len(x_sorted) * (1 - outlier_percent))]
+    y_min = y_sorted[int(len(y_sorted) * outlier_percent)]
+    y_max = y_sorted[int(len(y_sorted) * (1 - outlier_percent))]
+    
+    # Create rectangle corners
+    forced_corners = np.array([
+        [x_min, y_min],  # top-left
+        [x_max, y_min],  # top-right
+        [x_max, y_max],  # bottom-right
+        [x_min, y_max]   # bottom-left
+    ], dtype=np.float32)
+    
+    # Verify coverage
+    covered_regions = 0
+    for region in text_regions:
+        region_center = np.mean(region, axis=0)
+        if (x_min <= region_center[0] <= x_max and 
+            y_min <= region_center[1] <= y_max):
+            covered_regions += 1
+    
+    coverage_actual = covered_regions / total_regions
+    print(f"Forced rectangle covers {covered_regions}/{total_regions} regions ({coverage_actual*100:.1f}%)")
+    
+    if coverage_actual >= coverage_threshold * 0.8:  # Accept if at least 80% of target
+        return forced_corners
+    else:
+        # Fallback: use full convex hull corners approximated more aggressively
+        print("Coverage too low, using aggressive hull approximation...")
+        all_points = np.vstack(text_regions)
+        hull = cv2.convexHull(all_points.reshape(-1, 1, 2))
+        
+        # Try more aggressive epsilon values
+        for eps_factor in [0.05, 0.08, 0.1, 0.15]:
+            epsilon = eps_factor * cv2.arcLength(hull, True)
+            approx = cv2.approxPolyDP(hull, epsilon, True)
+            if len(approx) == 4:
+                return approx.reshape(4, 2)
+        
+        # Final fallback: find 4 most extreme points
+        return find_extreme_rectangle(all_points)
+
+
+def find_extreme_rectangle(points):
+    """
+    Find 4 corners by selecting the most extreme points.
+    """
+    # Find extreme points
+    leftmost = points[np.argmin(points[:, 0])]
+    rightmost = points[np.argmax(points[:, 0])]
+    topmost = points[np.argmin(points[:, 1])]
+    bottommost = points[np.argmax(points[:, 1])]
+    
+    # Create rectangle from extremes
+    x_min, x_max = leftmost[0], rightmost[0]
+    y_min, y_max = topmost[1], bottommost[1]
+    
+    return np.array([
+        [x_min, y_min],  # top-left
+        [x_max, y_min],  # top-right
+        [x_max, y_max],  # bottom-right
+        [x_min, y_max]   # bottom-left
+    ], dtype=np.float32)
+
 
 def detect_book_corners(img, debug_folder=None):
     """
@@ -394,37 +429,6 @@ def correct_perspective(img, corners):
     corrected = cv2.warpPerspective(img, matrix, (final_width, final_height))
     
     return corrected
-
-
-def visualize_detection(img, corners, output_path=None):
-    """
-    Draw the detected corners on the image for visualization.
-    """
-    vis_img = img.copy()
-    if len(vis_img.shape) == 2:
-        vis_img = cv2.cvtColor(vis_img, cv2.COLOR_GRAY2BGR)
-    colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255),
-              (128, 128, 128), (255, 128, 0)]
-    
-    # Draw the corners
-    for i, corner in enumerate(corners):
-        color = colors[i % len(colors)]
-        cv2.circle(vis_img, tuple(corner.astype(int)), 15, color, -1)
-        cv2.circle(vis_img, tuple(corner.astype(int)), 20, (255, 255, 255), 3)
-        cv2.putText(vis_img, str(i), tuple((corner + [25, 25]).astype(int)), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
-        cv2.putText(vis_img, str(i), tuple((corner + [25, 25]).astype(int)), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 2)
-    
-    # Draw lines connecting the corners
-    if len(corners) == 4:
-        cv2.polylines(vis_img, [corners.astype(int)], True, (0, 0, 255), 3)
-    
-    if output_path:
-        cv2.imwrite(output_path, vis_img)
-        print(f"Visualization saved to {output_path}")
-    
-    return vis_img
 
 
 def main(img_name, visualize=False):
