@@ -1,0 +1,28 @@
+{
+  "reliability": {
+    "soft_crash_detected": false
+  },
+  "telemetry": {
+    "consent_full": false
+  },
+  "version": "1.72.0 (Public)",
+  "tips": {
+    "last_displayed_time": 13388509036,
+    "disabled": false,
+    "next_index": 3
+  },
+  "tracking": {
+    "input": {
+      "left": 0
+    }
+  },
+  "device_profile": "Meta Quest 3",
+  "session_capture": {
+    "delay_start_ms": 1000,
+    "exec_state": "replay",
+    "quit_buffer_ms": 10000,
+    "quit_when_complete": false,
+    "record_path": "C:\\Users\\oudeis\\dev\\reading-room\\testing\\xr_simulator_recording.vrs",
+    "replay_path": "C:\\Users\\oudeis\\dev\\reading-room\\testing\\xr_simulator_replay.vrs"
+  }
+}
