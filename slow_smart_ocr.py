@@ -74,75 +74,35 @@ def bbox_debug_images(img, filtered_regions, clusters, debug_folder):
     # 4. Show final bounding boxes for main clusters (with outlier removal)
     bbox_vis = img.copy()
     
-    def get_tight_bounding_box(cluster_regions, outlier_percentile=10):
-        """Get bounding box using region centroids instead of all points"""
-        if not cluster_regions:
-            return None, 0
-        
-        # Get all centroids
+    def get_convex_hull_bbox(cluster_regions):
+        """
+        Use convex hull of centroids instead of all points
+        """
         centroids = []
-        region_bboxes = []
-        
         for region in cluster_regions:
             M = cv2.moments(region)
             if M['m00'] > 0:
                 cx = int(M['m10'] / M['m00'])
                 cy = int(M['m01'] / M['m00'])
-                centroids.append((cx, cy))
-                
-                # Also get individual region bounding box
-                x, y, w, h = cv2.boundingRect(region)
-                region_bboxes.append((x, y, x+w, y+h))  # Store as (x1, y1, x2, y2)
+                centroids.append([cx, cy])
         
-        if len(centroids) < 10:  # Not enough points to filter outliers
-            # Use bounding box of all region bounding boxes (not individual points)
-            if region_bboxes:
-                x1 = min(bbox[0] for bbox in region_bboxes)
-                y1 = min(bbox[1] for bbox in region_bboxes)
-                x2 = max(bbox[2] for bbox in region_bboxes)
-                y2 = max(bbox[3] for bbox in region_bboxes)
-                return (x1, y1, x2-x1, y2-y1), len(cluster_regions)
-            else:
-                all_points = np.vstack(cluster_regions)
-                return cv2.boundingRect(all_points), len(cluster_regions)
+        if len(centroids) < 3:
+            all_points = np.vstack(cluster_regions)
+            return cv2.boundingRect(all_points)
         
-        # Calculate distances from cluster center
-        centroids = np.array(centroids)
-        cluster_center = np.mean(centroids, axis=0)
-        distances = np.sqrt(np.sum((centroids - cluster_center)**2, axis=1))
-        
-        # Remove outliers based on distance
-        threshold = np.percentile(distances, 100 - outlier_percentile)
-        keep_indices = distances <= threshold
-        
-        # Use bounding boxes of kept regions only
-        filtered_bboxes = [region_bboxes[i] for i in range(len(region_bboxes)) if keep_indices[i]]
-        regions_used = sum(keep_indices)
-        
-        if filtered_bboxes:
-            x1 = min(bbox[0] for bbox in filtered_bboxes)
-            y1 = min(bbox[1] for bbox in filtered_bboxes)
-            x2 = max(bbox[2] for bbox in filtered_bboxes)
-            y2 = max(bbox[3] for bbox in filtered_bboxes)
-            return (x1, y1, x2-x1, y2-y1), regions_used
-        else:
-            # Fallback if all regions were filtered out
-            if region_bboxes:
-                x1 = min(bbox[0] for bbox in region_bboxes)
-                y1 = min(bbox[1] for bbox in region_bboxes)
-                x2 = max(bbox[2] for bbox in region_bboxes)
-                y2 = max(bbox[3] for bbox in region_bboxes)
-                return (x1, y1, x2-x1, y2-y1), len(cluster_regions)
-            else:
-                all_points = np.vstack(cluster_regions)
-                return cv2.boundingRect(all_points), len(cluster_regions)
+        centroids = np.array(centroids, dtype=np.int32)
+        hull = cv2.convexHull(centroids)
+        return cv2.boundingRect(hull)
+
     
     for i, cluster_regions in enumerate(clusters):
         if cluster_regions:  # Make sure cluster is not empty
             # Get tight bounding box with outlier removal
-            bbox_result = get_tight_bounding_box(cluster_regions, outlier_percentile=10)
-            if bbox_result[0] is not None:
-                (x, y, w, h), regions_used = bbox_result
+            # bbox_result = get_tight_bounding_box(cluster_regions, outlier_percentile=10)
+            bbox_result = get_convex_hull_bbox(cluster_regions)
+            if bbox_result is not None:
+                regions_used = 999
+                (x, y, w, h) = bbox_result
                 
                 # Draw bounding box
                 color = colors[i % len(colors)]
