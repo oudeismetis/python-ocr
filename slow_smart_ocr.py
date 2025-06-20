@@ -5,6 +5,369 @@ import numpy as np
 import cv2
 
 
+def bbox_debug_images(img, filtered_regions, clusters, debug_folder):
+    """
+    Debug visualization for morphological clustering results
+    
+    Args:
+        img: Original image
+        filtered_regions: List of MSER regions after preprocessing
+        clusters: List of cluster lists from morphological clustering
+        debug_folder: Output folder for debug images
+    """
+    if not debug_folder:
+        return
+    
+    colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0), 
+              (255, 0, 255), (0, 255, 255)]  # Green, Red, Blue, Yellow, Magenta, Cyan
+    
+    # 1. Show all filtered regions (before clustering)
+    all_regions_vis = img.copy()
+    for region in filtered_regions:
+        hull = cv2.convexHull(region.reshape(-1, 1, 2))
+        cv2.polylines(all_regions_vis, [hull], True, (0, 255, 0), 1)
+    
+    print(f"Writing image to: {debug_folder}/03_all_filtered_regions.jpg")
+    cv2.imwrite(f"{debug_folder}/03_all_filtered_regions.jpg", all_regions_vis)
+    
+    # 2. Show morphological mask (intermediate step)
+    mask = np.zeros(img.shape[:2], dtype=np.uint8)
+    for region in filtered_regions:
+        cv2.fillPoly(mask, [region], 255)
+    
+    # Apply morphological closing
+    kernel_size = min(img.shape[:2]) // 50
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    
+    print(f"Writing image to: {debug_folder}/04_morphological_mask.jpg")
+    cv2.imwrite(f"{debug_folder}/04_morphological_mask.jpg", closed)
+    
+    # 3. Show clustered regions with different colors
+    cluster_vis = img.copy()
+    
+    # Create a mapping from region to cluster
+    region_to_cluster = {}
+    for cluster_id, cluster_regions in enumerate(clusters):
+        for region in cluster_regions:
+            # Use region as key (convert to tuple for hashing)
+            region_key = tuple(region.flatten())
+            region_to_cluster[region_key] = cluster_id
+    
+    # Draw regions colored by cluster
+    unclustered_count = 0
+    for region in filtered_regions:
+        region_key = tuple(region.flatten())
+        if region_key in region_to_cluster:
+            cluster_id = region_to_cluster[region_key]
+            color = colors[cluster_id % len(colors)]
+        else:
+            color = (128, 128, 128)  # Gray for unclustered (noise)
+            unclustered_count += 1
+        
+        hull = cv2.convexHull(region.reshape(-1, 1, 2))
+        cv2.polylines(cluster_vis, [hull], True, color, 1)
+    
+    print(f"Writing image to: {debug_folder}/05_clustered_regions.jpg")
+    cv2.imwrite(f"{debug_folder}/05_clustered_regions.jpg", cluster_vis)
+    
+    # 4. Show final bounding boxes for main clusters (with outlier removal)
+    bbox_vis = img.copy()
+    
+    def get_tight_bounding_box(cluster_regions, outlier_percentile=10):
+        """Get bounding box using region centroids instead of all points"""
+        if not cluster_regions:
+            return None, 0
+        
+        # Get all centroids
+        centroids = []
+        region_bboxes = []
+        
+        for region in cluster_regions:
+            M = cv2.moments(region)
+            if M['m00'] > 0:
+                cx = int(M['m10'] / M['m00'])
+                cy = int(M['m01'] / M['m00'])
+                centroids.append((cx, cy))
+                
+                # Also get individual region bounding box
+                x, y, w, h = cv2.boundingRect(region)
+                region_bboxes.append((x, y, x+w, y+h))  # Store as (x1, y1, x2, y2)
+        
+        if len(centroids) < 10:  # Not enough points to filter outliers
+            # Use bounding box of all region bounding boxes (not individual points)
+            if region_bboxes:
+                x1 = min(bbox[0] for bbox in region_bboxes)
+                y1 = min(bbox[1] for bbox in region_bboxes)
+                x2 = max(bbox[2] for bbox in region_bboxes)
+                y2 = max(bbox[3] for bbox in region_bboxes)
+                return (x1, y1, x2-x1, y2-y1), len(cluster_regions)
+            else:
+                all_points = np.vstack(cluster_regions)
+                return cv2.boundingRect(all_points), len(cluster_regions)
+        
+        # Calculate distances from cluster center
+        centroids = np.array(centroids)
+        cluster_center = np.mean(centroids, axis=0)
+        distances = np.sqrt(np.sum((centroids - cluster_center)**2, axis=1))
+        
+        # Remove outliers based on distance
+        threshold = np.percentile(distances, 100 - outlier_percentile)
+        keep_indices = distances <= threshold
+        
+        # Use bounding boxes of kept regions only
+        filtered_bboxes = [region_bboxes[i] for i in range(len(region_bboxes)) if keep_indices[i]]
+        regions_used = sum(keep_indices)
+        
+        if filtered_bboxes:
+            x1 = min(bbox[0] for bbox in filtered_bboxes)
+            y1 = min(bbox[1] for bbox in filtered_bboxes)
+            x2 = max(bbox[2] for bbox in filtered_bboxes)
+            y2 = max(bbox[3] for bbox in filtered_bboxes)
+            return (x1, y1, x2-x1, y2-y1), regions_used
+        else:
+            # Fallback if all regions were filtered out
+            if region_bboxes:
+                x1 = min(bbox[0] for bbox in region_bboxes)
+                y1 = min(bbox[1] for bbox in region_bboxes)
+                x2 = max(bbox[2] for bbox in region_bboxes)
+                y2 = max(bbox[3] for bbox in region_bboxes)
+                return (x1, y1, x2-x1, y2-y1), len(cluster_regions)
+            else:
+                all_points = np.vstack(cluster_regions)
+                return cv2.boundingRect(all_points), len(cluster_regions)
+    
+    for i, cluster_regions in enumerate(clusters):
+        if cluster_regions:  # Make sure cluster is not empty
+            # Get tight bounding box with outlier removal
+            bbox_result = get_tight_bounding_box(cluster_regions, outlier_percentile=10)
+            if bbox_result[0] is not None:
+                (x, y, w, h), regions_used = bbox_result
+                
+                # Draw bounding box
+                color = colors[i % len(colors)]
+                cv2.rectangle(bbox_vis, (x, y), (x + w, y + h), color, 3)
+                
+                # Add cluster label
+                cv2.putText(bbox_vis, f'Page {i + 1}', (x, y - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+                
+                # Add cluster info
+                cv2.putText(bbox_vis, f'{regions_used}/{len(cluster_regions)} regions', 
+                           (x, y + h + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                
+                print(f"Cluster {i + 1}: {regions_used}/{len(cluster_regions)} regions used, "
+                      f"bbox: ({x}, {y}, {w}, {h})")
+    
+    print(f"Writing image to: {debug_folder}/06_final_bounding_boxes.jpg")
+    cv2.imwrite(f"{debug_folder}/06_final_bounding_boxes.jpg", bbox_vis)
+    
+    # 5. Summary overlay showing both regions and bounding boxes
+    summary_vis = img.copy()
+    
+    # Draw all clustered regions lightly
+    for i, cluster_regions in enumerate(clusters):
+        color = colors[i % len(colors)]
+        for region in cluster_regions:
+            hull = cv2.convexHull(region.reshape(-1, 1, 2))
+            cv2.polylines(summary_vis, [hull], True, color, 1)
+        
+        # Draw bounding box on top
+        if cluster_regions:
+            all_points = np.vstack(cluster_regions)
+            x, y, w, h = cv2.boundingRect(all_points)
+            cv2.rectangle(summary_vis, (x, y), (x + w, y + h), color, 3)
+            cv2.putText(summary_vis, f'Page {i + 1}', (x, y - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+    
+    print(f"Writing image to: {debug_folder}/07_summary_overlay.jpg")
+    cv2.imwrite(f"{debug_folder}/07_summary_overlay.jpg", summary_vis)
+    
+    # Print summary stats
+    print(f"\n=== Clustering Summary ===")
+    print(f"Total filtered regions: {len(filtered_regions)}")
+    print(f"Number of clusters found: {len(clusters)}")
+    print(f"Unclustered regions: {unclustered_count}")
+    print(f"Kernel size used: {kernel_size}")
+    for i, cluster in enumerate(clusters):
+        print(f"Cluster {i + 1}: {len(cluster)} regions")
+    print("=========================\n")
+
+def bbox_debug_images_kmeans(img, filtered_regions, centers, centers_final, labels, K, debug_folder=None):
+    if debug_folder:
+        # Visualize clustered regions with different colors
+        cluster_vis = img.copy()
+        colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0)]  # Green, Red, Blue, Yellow
+        labels_flat = labels.flatten()
+		# Draw each region colored by its cluster
+        for i, region in enumerate(filtered_regions):
+            if i < len(labels_flat):  # Make sure we have a label for this region
+                color = colors[labels_flat[i] % len(colors)]
+                hull = cv2.convexHull(region.reshape(-1, 1, 2))
+                cv2.polylines(cluster_vis, [hull], True, color, 1)
+
+        print(f"Writing image to: {debug_folder}/03_clustered_regions.jpg")
+        cv2.imwrite(f"{debug_folder}/03_clustered_regions.jpg", cluster_vis)
+
+        # Visualize final bounding boxes
+        bbox_vis = img.copy()
+
+        # Find bounding boxes for each cluster
+        for cluster_id in range(K):
+            # Get all regions belonging to this cluster
+            cluster_regions = [filtered_regions[i] for i in range(len(filtered_regions)) 
+                if i < len(labels_flat) and labels_flat[i] == cluster_id]
+    
+            if cluster_regions:
+                # Combine all points from this cluster
+                all_points = np.vstack(cluster_regions)
+                x, y, w, h = cv2.boundingRect(all_points)
+
+                # Draw bounding box
+                color = colors[cluster_id % len(colors)]
+                cv2.rectangle(bbox_vis, (x, y), (x + w, y + h), color, 3)
+
+                # Add cluster label
+                cv2.putText(bbox_vis, f'Page {cluster_id + 1}', (x, y - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+
+                print(f"Cluster {cluster_id}: {len(cluster_regions)} regions, "
+                      f"bbox: ({x}, {y}, {w}, {h})")
+
+        print(f"Writing image to: {debug_folder}/04_final_bounding_boxes.jpg")
+        cv2.imwrite(f"{debug_folder}/04_final_bounding_boxes.jpg", bbox_vis)
+
+        # Optional: Show cluster centers
+        centers_vis = img.copy()
+        for i, center in enumerate(centers):
+            color = colors[labels_flat[i] % len(colors)] if i < len(labels_flat) else (128, 128, 128)
+            cv2.circle(centers_vis, tuple(map(int, center)), 3, color, -1)
+
+        # Draw final cluster centers from k-means
+        for i, final_center in enumerate(centers_final):
+            cv2.circle(centers_vis, tuple(map(int, final_center)), 8, colors[i], 3)
+            cv2.putText(centers_vis, f'C{i}', tuple(map(int, final_center + 15)), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors[i], 2)
+
+        print(f"Writing image to: {debug_folder}/05_cluster_centers.jpg")
+        cv2.imwrite(f"{debug_folder}/05_cluster_centers.jpg", centers_vis)
+
+
+def cluster_regions_by_spatial_separation(regions, img_shape):
+    """
+    Cluster regions by finding natural spatial separation (like book spine)
+    """
+    # Get centroids
+    centroids = []
+    for region in regions:
+        M = cv2.moments(region)
+        if M['m00'] > 0:
+            cx = int(M['m10'] / M['m00'])
+            cy = int(M['m01'] / M['m00'])
+            centroids.append((cx, cy))
+    
+    if len(centroids) < 20:
+        return [regions]  # Not enough regions to cluster
+    
+    centroids = np.array(centroids)
+    
+    # Find the vertical line that best separates the regions (book spine)
+    x_coords = centroids[:, 0]
+    
+    # Try different vertical split lines and find the one with minimum overlap
+    img_width = img_shape[1]
+    best_split = img_width // 2
+    best_balance = float('inf')
+    
+    # Test splits from 1/3 to 2/3 of image width
+    for split_x in range(img_width // 3, 2 * img_width // 3, 10):
+        left_count = sum(x < split_x for x in x_coords)
+        right_count = sum(x >= split_x for x in x_coords)
+        
+        # We want roughly balanced clusters
+        if left_count > 10 and right_count > 10:
+            balance = abs(left_count - right_count)
+            if balance < best_balance:
+                best_balance = balance
+                best_split = split_x
+    
+    print(f"Best vertical split at x={best_split}")
+    
+    # Split regions based on centroid x-coordinate
+    left_cluster = []
+    right_cluster = []
+    
+    for i, region in enumerate(regions):
+        if i < len(centroids):
+            cx = centroids[i][0]
+            if cx < best_split:
+                left_cluster.append(region)
+            else:
+                right_cluster.append(region)
+    
+    clusters = []
+    if len(left_cluster) > 10:
+        clusters.append(left_cluster)
+    if len(right_cluster) > 10:
+        clusters.append(right_cluster)
+    
+    print(f"Spatial clustering: {len(left_cluster)} left, {len(right_cluster)} right")
+    return clusters
+
+def cluster_regions_morphological(regions, img_shape):
+    # Create binary mask from all regions
+    mask = np.zeros(img_shape[:2], dtype=np.uint8)
+    for region in regions:
+        cv2.fillPoly(mask, [region], 255)
+    
+    # Morphological closing to connect nearby regions
+    # Adjust kernel size based on expected text spacing
+    kernel_size = min(img_shape[:2]) // 50  # Try 100?
+    # kernel_size = max(kernel_size, 10)  # But not too small
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    
+    # Find connected components
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Group original regions by which connected component they belong to
+    clusters = []
+    for contour in contours:
+        cluster_regions = []
+        for region in regions:
+            # Check if region centroid is inside this connected component
+            M = cv2.moments(region)
+            if M['m00'] > 0:
+                cx = int(M['m10'] / M['m00'])
+                cy = int(M['m01'] / M['m00'])
+                if cv2.pointPolygonTest(contour, (cx, cy), False) >= 0:
+                    cluster_regions.append(region)
+        
+        if len(cluster_regions) > 10:  # Filter small clusters (noise)
+            clusters.append(cluster_regions)
+    
+    # Sort clusters by size and return the 2 largest
+    clusters.sort(key=len, reverse=True)
+    return clusters[:2] if len(clusters) >= 2 else clusters
+
+def filter_regions(regions):
+    areas = [cv2.contourArea(region) for region in regions]
+    q25, q75 = np.percentile(areas, [25, 75])
+    iqr = q75 - q25
+    min_area = max(1, q25 - 1.5 * iqr)
+    max_area = q75 + 1.5 * iqr
+
+    return [region for region in regions if min_area <= cv2.contourArea(region) <= max_area]
+
+def get_region_centers(regions):
+    """
+    Get the center point of all regions
+    Makes it easier to do bounding box math
+    """
+    centroids = [cv2.moments(region) for region in regions]
+    centers = [(int(M['m10']/M['m00']), int(M['m01']/M['m00'])) for M in centroids]
+    return np.float32(centers)
+
 def detect_text_regions_mser(img, debug_folder=None):
     """
     Use MSER to detect text regions and find their bounding corners.
@@ -37,6 +400,21 @@ def detect_text_regions_mser(img, debug_folder=None):
     
     regions, _ = mser.detectRegions(gray)
     print(f"Found {len(regions)} regions using MSER")
+    filtered_regions = filter_regions(regions)
+    print(f"Filtered down to {len(filtered_regions)} regions")
+    # centers = get_region_centers(filtered_regions)
+    # K = 3  # Number of clusters (2 pages)
+    # criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+    # attempts = 10
+    # flags = cv2.KMEANS_RANDOM_CENTERS
+    # More robust version
+    # criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.1)
+    # attempts = 20
+    # flags = cv2.KMEANS_PP_CENTERS  # Often gives better clustering
+    # compactness, labels, centers_final = cv2.kmeans(centers, K, None, criteria, attempts, flags)
+
+    clusters = cluster_regions_morphological(filtered_regions, img.shape)
+    # clusters = cluster_regions_by_spatial_separation(filtered_regions, img.shape)
     
     if debug_folder:
         mser_vis = img.copy()
@@ -45,6 +423,8 @@ def detect_text_regions_mser(img, debug_folder=None):
             cv2.polylines(mser_vis, [hull], True, (0, 255, 0), 1)
         print(f"Writing image to: {debug_folder}/02_mser_regions.jpg")
         cv2.imwrite(f"{debug_folder}/02_mser_regions.jpg", mser_vis)
+    # bbox_debug_images(img, filtered_regions, centers, centers_final, labels, K, debug_folder)
+    bbox_debug_images(img, filtered_regions, clusters, debug_folder)
     
     # Filter regions that look like text
     text_regions = []
@@ -66,7 +446,7 @@ def detect_text_regions_mser(img, debug_folder=None):
             # Visualize the combined hull
             hull_img = img.copy()
             cv2.polylines(hull_img, [text_hull], True, (255, 0, 255), 4)
-            cv2.imwrite(f"{debug_folder}/03_mser_combined_hull.jpg", hull_img)
+            cv2.imwrite(f"{debug_folder}/08_mser_combined_hull.jpg", hull_img)
         
         # Try standard approximation first
         epsilon = 0.02 * cv2.arcLength(text_hull, True)
@@ -94,7 +474,7 @@ def detect_text_regions_mser(img, debug_folder=None):
             area = cv2.contourArea(final_corners.astype(int))
             cv2.putText(bbox_img, f"Area: {area:.0f}", (20, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            cv2.imwrite(f"{debug_folder}/04_mser_final_rectangle.jpg", bbox_img)
+            cv2.imwrite(f"{debug_folder}/09_mser_final_rectangle.jpg", bbox_img)
         return final_corners
 
 
@@ -426,7 +806,7 @@ def main(img_name, visualize=False):
         corrected_img = correct_perspective(img, corners)
         
         # Save corrected image for inspection
-        cv2.imwrite(f"{images_folder}/05_corrected.jpg", corrected_img)
+        cv2.imwrite(f"{images_folder}/10_corrected.jpg", corrected_img)
         print(f"Corrected image saved as {images_folder}/05_corrected.jpg")
         
         # Perform OCR on the corrected image
