@@ -102,7 +102,6 @@ def bbox_debug_images(img, filtered_regions, clusters, debug_folder):
         
         centroids = np.array(centroids, dtype=np.int32)
         hull = cv2.convexHull(centroids)
-        # return cv2.boundingRect(hull)
         return np.squeeze(hull).astype(np.float32)
 
     
@@ -226,10 +225,7 @@ def detect_text_regions_mser(img, debug_folder=None):
             cv2.polylines(mser_vis, [hull], True, (0, 255, 0), 1)
         logger.info(f"Writing image to: {debug_folder}/02_mser_regions.jpg")
         cv2.imwrite(f"{debug_folder}/02_mser_regions.jpg", mser_vis)
-    # bbox_debug_images(img, filtered_regions, centers, centers_final, labels, K, debug_folder)
-    final_corners = bbox_debug_images(img, filtered_regions, clusters, debug_folder)
-    
-    return final_corners
+    return bbox_debug_images(img, filtered_regions, clusters, debug_folder)
 
 def crop_image(image, final_corners, debug_folder, idx=0):
     # Get the bounding rectangle of the convex hull
