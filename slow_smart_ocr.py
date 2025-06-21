@@ -13,7 +13,8 @@ import cv2
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
+kernal_config_width = 50
+kernal_config_height = 15
 
 def bbox_debug_images(img, filtered_regions, clusters, debug_folder):
     """
@@ -46,8 +47,9 @@ def bbox_debug_images(img, filtered_regions, clusters, debug_folder):
         cv2.fillPoly(mask, [region], 255)
     
     # Apply morphological closing
-    kernel_size = min(img.shape[:2]) // 50
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    kernel_width = min(img.shape[:2]) // kernal_config_width
+    kernel_height = min(img.shape[:2]) // kernal_config_height
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, kernel_height))
     closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     
     logger.info(f"Writing image to: {debug_folder}/04_morphological_mask.jpg")
@@ -137,7 +139,6 @@ def bbox_debug_images(img, filtered_regions, clusters, debug_folder):
     logger.info(f"Total filtered regions: {len(filtered_regions)}")
     logger.info(f"Number of clusters found: {len(clusters)}")
     logger.info(f"Unclustered regions: {unclustered_count}")
-    logger.info(f"Kernel size used: {kernel_size}")
     for i, cluster in enumerate(clusters):
         logger.info(f"Cluster {i + 1}: {len(cluster)} regions")
     logger.info("=========================\n")
@@ -151,9 +152,9 @@ def cluster_regions_morphological(regions, img_shape):
     
     # Morphological closing to connect nearby regions
     # Adjust kernel size based on expected text spacing
-    kernel_size = min(img_shape[:2]) // 50  # Try 100?
-    # kernel_size = max(kernel_size, 10)  # But not too small
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    kernel_width = min(img_shape[:2]) // kernal_config_width
+    kernel_height = min(img_shape[:2]) // kernal_config_height
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, kernel_height))
     closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     
     # Find connected components
@@ -179,6 +180,33 @@ def cluster_regions_morphological(regions, img_shape):
     clusters.sort(key=len, reverse=True)
     return clusters[:2] if len(clusters) >= 2 else clusters
 
+def grid_sample_regions(regions, img_shape, target_regions=6000):
+    """Sample regions using spatial grid for even coverage"""
+    if len(regions) <= target_regions:
+        return regions
+
+    # TODO - Sometimes we still filter down too much
+
+    h, w = img_shape[:2]
+    
+    # Calculate grid size to get approximately target number of regions
+    total_cells = min(len(regions), target_regions)
+    grid_size = int(np.sqrt(h * w / total_cells))
+    
+    grid = {}
+    for region in regions:
+        M = cv2.moments(region)
+        if M['m00'] > 0:
+            cx = int(M['m10'] / M['m00'])
+            cy = int(M['m01'] / M['m00'])
+            grid_key = (cx // grid_size, cy // grid_size)
+            
+            # Keep first region in each grid cell (or could keep largest)
+            if grid_key not in grid:
+                grid[grid_key] = region
+    
+    return list(grid.values())
+
 def detect_text_regions_mser(img, debug_folder=None):
     """
     Use MSER to detect text regions and find their bounding corners.
@@ -186,8 +214,8 @@ def detect_text_regions_mser(img, debug_folder=None):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
     mser = cv2.MSER_create(
         delta=5,
-        min_area=10,
-        max_area=300,
+        min_area=5,
+        max_area=100,
         max_variation=0.5,
         min_diversity=0.5,
         max_evolution=200,
@@ -211,8 +239,9 @@ def detect_text_regions_mser(img, debug_folder=None):
     
     regions, _ = mser.detectRegions(gray)
     logger.info(f"Found {len(regions)} regions using MSER")
-    sample_size = max(1, len(regions) // 8)
-    filtered_regions = random.sample(regions, sample_size)
+    # sample_size = max(1, len(regions) // 8)
+    # filtered_regions = random.sample(regions, sample_size)
+    filtered_regions = grid_sample_regions(regions, img.shape)
     logger.info(f"Filtered down to {len(filtered_regions)} regions")
 
     clusters = cluster_regions_morphological(filtered_regions, img.shape)
@@ -254,6 +283,7 @@ def crop_image(image, final_corners, debug_folder, idx=0):
     cropped_hull = cv2.bitwise_and(cropped_rect, cropped_rect, mask=mask)
     """
     logger.info(f"Writing image to: 07_{idx}_cropped.jpg")
+    logger.info(f"Image shape: {cropped_hull.shape}")
     cv2.imwrite(f"{debug_folder}/07_{idx}_cropped.jpg", cropped_hull)
     return cropped_hull
 

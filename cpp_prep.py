@@ -37,8 +37,9 @@ def cluster_regions_morphological(regions, img_shape):
     
     # Morphological closing to connect nearby regions
     # Adjust kernel size based on expected text spacing
-    kernel_size = min(img_shape[:2]) // 50
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    kernal_width = min(img_shape[:2]) // 50
+    kernal_height = min(img_shape[:2]) // 15
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernal_width, kernal_height))
     closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     
     # Find connected components
@@ -71,8 +72,8 @@ def detect_text_regions_mser(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
     mser = cv2.MSER_create(
         delta=5,
-        min_area=10,
-        max_area=300,
+        min_area=5,
+        max_area=100,
         max_variation=0.5,
         min_diversity=0.5,
         max_evolution=200,
@@ -126,6 +127,31 @@ def crop_image(image, corners, debug_folder, idx=0):
     cv2.imwrite(f"{debug_folder}/07_{idx}_cropped.jpg", cropped_hull)
     return cropped_hull
 
+def grid_sample_regions(regions, img_shape, target_regions=5000):
+    """Sample regions using spatial grid for even coverage"""
+    if len(regions) <= target_regions:
+        return regions
+
+    # TODO - Sometimes we still filter down too much
+    h, w = img_shape[:2]
+    
+    # Calculate grid size to get approximately target number of regions
+    total_cells = min(len(regions), target_regions)
+    grid_size = int(np.sqrt(h * w / total_cells))
+    
+    grid = {}
+    for region in regions:
+        M = cv2.moments(region)
+        if M['m00'] > 0:
+            cx = int(M['m10'] / M['m00'])
+            cy = int(M['m01'] / M['m00'])
+            grid_key = (cx // grid_size, cy // grid_size)
+            
+            # Keep first region in each grid cell (or could keep largest)
+            if grid_key not in grid:
+                grid[grid_key] = region
+    
+    return list(grid.values())
 
 def main(img_name):
     now = datetime.now()
@@ -138,8 +164,10 @@ def main(img_name):
         img = cv2.imread(img_name)
         regions = detect_text_regions_mser(img)
         logger.info(f"Found {len(regions)} regions using MSER")
-        sample_size = max(1, len(regions) // 8)
-        filtered_regions = random.sample(regions, sample_size)
+        # sample_size = max(1, len(regions) // 8)
+        # filtered_regions = random.sample(regions, sample_size)
+        filtered_regions = grid_sample_regions(regions, img.shape)
+
         logger.info(f"Filtered down to {len(filtered_regions)} regions")
 
         clusters = cluster_regions_morphological(filtered_regions, img.shape)
