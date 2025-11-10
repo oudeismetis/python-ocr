@@ -35,11 +35,13 @@ It does NOT solve the `new_chapter` problem.
 
 `claude_exp_3.py` is showing similar promise and kind of does OK with `new_chapter`.
 
-Could maybe go with one of those and resolve everything else with 4 rules:
+Could maybe go with one of those and resolve everything else with some possible rules:
 1. If the 2 largest blocks are on top of each other, merge them as one.
-2. Extend the `Y` of both blocks to match each other. So same height.
-3. The `X` of the 2 blocks can not overlap each other at all.
-4. The start `X` of the left block can't be too close to image edge. Same for the end `X` of the right block. If true, ignore that block and don't OCR.
+1. When controlled for skew, the 2 largest blocks should be ~ the same width.
+1. The 2 largest blocks should be no further from each other than X% of page text width. 
+1. Extend the `Y` of both blocks to match each other. So same height.
+1. The `X` of the 2 blocks can not overlap each other at all.
+1. The start `X` of the left block can't be too close to image edge. Same for the end `X` of the right block. If true, ignore that block and don't OCR.
 
 BUT....
 This is not object tracking. So maybe table this for the moment and take a hard run at real time object tracking of a book?
