@@ -23,32 +23,6 @@ def load_image(img_name):
             img_orig = cv2.cvtColor(img_orig, cv2.COLOR_RGB2BGR)
     return img_orig
 
-def adaptive_canny(gray, block_size=15):
-    """
-    Apply Canny edge detection with locally adaptive thresholds
-    based on local contrast
-    """
-    # Calculate local standard deviation as measure of contrast
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    mean = cv2.blur(gray.astype(np.float32), (block_size, block_size))
-    mean_sq = cv2.blur((gray.astype(np.float32) ** 2), (block_size, block_size))
-    std = np.sqrt(np.maximum(mean_sq - mean * mean, 0))
-    
-    # Normalize std to get adaptive thresholds
-    if np.max(std) > np.min(std):
-        std_norm = cv2.normalize(std, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    else:
-        # If uniform, create a default contrast map
-        std_norm = np.ones_like(gray) * 128
-    
-    # Use median of local contrast for threshold
-    median_std = np.median(std_norm)
-    lower = max(50, int(median_std * 0.5))
-    upper = min(200, int(median_std * 1.5))
-    
-    edges = cv2.Canny(blur, lower, upper)
-    return edges, std_norm
-
 def is_page_like(contour, img_shape):
     """
     Check if contour has properties consistent with a book page
@@ -56,13 +30,13 @@ def is_page_like(contour, img_shape):
     # Minimum area (pages should be substantial)
     area = cv2.contourArea(contour)
     img_area = img_shape[0] * img_shape[1]
-    if area < img_area * 0.02:  # At least 1% of image
+    if area < img_area * 0.05:  # At least 5% of image
         return False
     
-    # Shouldn't be the whole image
-    if area > img_area * 0.8:
+    # Maximum area (shouldn't be entire image)
+    if area > img_area * 0.6:  # Not more than 60%
         return False
-
+    
     # Check if we can fit a rectangle
     rect = cv2.minAreaRect(contour)
     box_area = rect[1][0] * rect[1][1]
@@ -88,7 +62,7 @@ def is_page_like(contour, img_shape):
     if hull_area == 0:
         return False
     convexity = area / hull_area
-    if convexity < 0.75:  # Pages should be mostly convex
+    if convexity < 0.7:  # Pages should be mostly convex
         return False
     
     return True
@@ -252,6 +226,7 @@ def main(img_name):
     
     # Load image
     img = load_image(img_name)
+    print(f"Loaded image: {img.shape}")
     cv2.imwrite(os.path.join(output_folder, "01_original.png"), img)
     
     # Step 1: Downscale for speed
@@ -261,52 +236,96 @@ def main(img_name):
     cv2.imwrite(os.path.join(output_folder, "02_downscaled.png"), small)
     
     # Step 2: Bilateral filter (preserves edges while reducing noise)
-    blurred = cv2.bilateralFilter(small, 9, 75, 75)
+    blurred = cv2.bilateralFilter(small, 9, 25, 25)
     cv2.imwrite(os.path.join(output_folder, "03_bilateral_filtered.png"), blurred)
     
     # Step 3: Convert to grayscale
     gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
     cv2.imwrite(os.path.join(output_folder, "04_grayscale.png"), gray)
     
-    # Step 4: Adaptive Canny edge detection
-    edges, contrast_map = adaptive_canny(gray)
-    print(f"Edge detection complete")
-    cv2.imwrite(os.path.join(output_folder, "05_contrast_map.png"), contrast_map)
-    cv2.imwrite(os.path.join(output_folder, "06_edges.png"), edges)
-
-    # Other than letters not being filled in and having a border, this looks REAL good !!!!!!!!
-    # thresh = cv2.bitwise_not(edges)
-    # cv2.imwrite(os.path.join(output_folder, "06b_flipped.png"), thresh)
-
-
-    # NEW: Step 4.5: Morphological operations to close gaps and form page regions
-    # Dilate to connect nearby edges (especially page borders)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    dilated = cv2.dilate(edges, kernel, iterations=2)
-    cv2.imwrite(os.path.join(output_folder, "06b_dilated.png"), dilated)
+    # PHASE 1: Find general book region using brightness
+    print("\n=== PHASE 1: Find book region ===")
     
-    # Close to fill small holes
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (8, 8))
-    closed = cv2.morphologyEx(dilated, cv2.MORPH_CLOSE, kernel_close, iterations=1)
-    cv2.imwrite(os.path.join(output_folder, "06c_closed.png"), closed)
+    # Threshold to separate bright pages from background
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    cv2.imwrite(os.path.join(output_folder, "05_binary_otsu.png"), binary)
     
-    # Optional: Erode slightly to restore edge positions
-    kernel_erode = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    processed_edges = cv2.erode(closed, kernel_erode, iterations=1)
-    cv2.imwrite(os.path.join(output_folder, "06d_processed_edges.png"), processed_edges)
+    # If pages appear black, uncomment:
+    # binary = cv2.bitwise_not(binary)
     
-
+    # Clean up and find book region
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_open, iterations=2)
     
-    # Step 5: Find contours
-    contours, hierarchy = cv2.findContours(processed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Close to merge pages into one region
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10))
+    book_region_binary = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel_close, iterations=3)
+    cv2.imwrite(os.path.join(output_folder, "06_book_region_binary.png"), book_region_binary)
+    
+    # Find the largest contour (should be the book)
+    contours, _ = cv2.findContours(book_region_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if len(contours) == 0:
+        print("No book region found!")
+        return None
+    
+    book_contour = max(contours, key=cv2.contourArea)
+    book_mask = np.zeros_like(gray)
+    cv2.drawContours(book_mask, [book_contour], -1, 255, -1)
+    
+    # Expand mask slightly to ensure we don't cut off edges
+    kernel_expand = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 20))
+    book_mask = cv2.dilate(book_mask, kernel_expand, iterations=1)
+    cv2.imwrite(os.path.join(output_folder, "07_book_mask.png"), book_mask)
+    
+    # PHASE 2: Find page edges within the book region
+    print("\n=== PHASE 2: Find page edges ===")
+    
+    # Apply mask to original image
+    masked_gray = cv2.bitwise_and(gray, book_mask)
+    cv2.imwrite(os.path.join(output_folder, "08_masked_grayscale.png"), masked_gray)
+    
+    # Edge detection on the masked region
+    # Use Canny to find page boundaries
+    edges = cv2.Canny(masked_gray, 50, 150)
+    cv2.imwrite(os.path.join(output_folder, "09_edges.png"), edges)
+    
+    # Strengthen vertical edges (spine and page sides are vertical)
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
+    vertical_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, vertical_kernel)
+    cv2.imwrite(os.path.join(output_folder, "10_vertical_edges.png"), vertical_edges)
+    
+    # Also strengthen horizontal edges (top and bottom of pages)
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
+    horizontal_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, horizontal_kernel)
+    cv2.imwrite(os.path.join(output_folder, "11_horizontal_edges.png"), horizontal_edges)
+    
+    # Combine vertical and horizontal
+    combined_edges = cv2.bitwise_or(vertical_edges, horizontal_edges)
+    cv2.imwrite(os.path.join(output_folder, "12_combined_edges.png"), combined_edges)
+    
+    # Dilate edges to form closed rectangles
+    rect_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    dilated_edges = cv2.dilate(combined_edges, rect_kernel, iterations=2)
+    cv2.imwrite(os.path.join(output_folder, "13_dilated_edges.png"), dilated_edges)
+    
+    # Close to form solid page regions
+    # SKIP??
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
+    closed_edges = cv2.morphologyEx(dilated_edges, cv2.MORPH_CLOSE, close_kernel, iterations=2)
+    cv2.imwrite(os.path.join(output_folder, "14_closed_edges.png"), closed_edges)
+    
+    # PHASE 3: Find page contours
+    print("\n=== PHASE 3: Extract page contours ===")
+    
+    contours, hierarchy = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     print(f"Found {len(contours)} contours")
     
     # Draw all contours for debugging
     all_contours_img = small.copy()
     cv2.drawContours(all_contours_img, contours, -1, (0, 255, 0), 2)
-    cv2.imwrite(os.path.join(output_folder, "07_all_contours.png"), all_contours_img)
+    cv2.imwrite(os.path.join(output_folder, "15_all_contours.png"), all_contours_img)
     
-    # Step 6: Filter contours by page-like properties
+    # Filter contours by page-like properties
     candidates = []
     for contour in contours:
         if is_page_like(contour, small.shape):
@@ -316,10 +335,18 @@ def main(img_name):
     
     # Draw candidate contours
     candidates_img = small.copy()
-    cv2.drawContours(candidates_img, candidates, -1, (0, 255, 255), 2)
-    cv2.imwrite(os.path.join(output_folder, "08_candidate_contours.png"), candidates_img)
+    cv2.drawContours(candidates_img, candidates, -1, (0, 255, 255), 3)
+    for i, contour in enumerate(candidates):
+        M = cv2.moments(contour)
+        if M['m00'] != 0:
+            cx = int(M['m10'] / M['m00'])
+            cy = int(M['m01'] / M['m00'])
+            area = cv2.contourArea(contour)
+            cv2.putText(candidates_img, f"{i}: {int(area)}", (cx-30, cy), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+    cv2.imwrite(os.path.join(output_folder, "16_candidate_contours.png"), candidates_img)
     
-    # Step 7: Fit quadrilaterals
+    # Fit quadrilaterals
     quadrilaterals = []
     for contour in candidates:
         quad = fit_quadrilateral(contour)
@@ -332,13 +359,16 @@ def main(img_name):
     quads_img = small.copy()
     for quad in quadrilaterals:
         cv2.drawContours(quads_img, [quad], 0, (255, 0, 255), 3)
-    cv2.imwrite(os.path.join(output_folder, "09_quadrilaterals.png"), quads_img)
+    cv2.imwrite(os.path.join(output_folder, "17_quadrilaterals.png"), quads_img)
     
-    # Step 8: Find best pair of adjacent pages
+    # Find best pair of adjacent pages
     left_page, right_page = find_best_page_pair(quadrilaterals, small.shape)
     
-    # Step 9: Draw final result
+    # Draw final result
     result_img = small.copy()
+    
+    flatness_left = 0.0
+    flatness_right = 0.0
     
     if left_page is not None:
         cv2.drawContours(result_img, [left_page], 0, (0, 255, 0), 3)
@@ -366,7 +396,7 @@ def main(img_name):
             cv2.putText(result_img, f"R: {flatness_right:.2f}", (cx-30, cy), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
     
-    cv2.imwrite(os.path.join(output_folder, "10_final_result.png"), result_img)
+    cv2.imwrite(os.path.join(output_folder, "18_final_result.png"), result_img)
     
     # Scale coordinates back to original resolution if needed
     if left_page is not None and scale_factor != 1.0:
@@ -382,8 +412,8 @@ def main(img_name):
     return {
         'left_page': left_page_full,
         'right_page': right_page_full,
-        'flatness_left': flatness_left if left_page is not None else 0.0,
-        'flatness_right': flatness_right if right_page is not None else 0.0,
+        'flatness_left': flatness_left,
+        'flatness_right': flatness_right,
         'num_candidates': len(candidates)
     }
 
