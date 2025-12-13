@@ -1,3 +1,5 @@
+import sys
+
 from PIL import Image
 from pytesseract import image_to_string
 import numpy as np
@@ -24,5 +26,6 @@ def main(img_name):
 if __name__ == "__main__":
     # https://towardsdatascience.com/create-simple-optical-character-recognition-ocr-with-python-6d90adb82bb8
     # img_name = 'test.png'
-    img_name = 'test_noisy.png'
+    # img_name = 'test_noisy.png'
+    img_name = sys.argv[1]
     main(img_name)
